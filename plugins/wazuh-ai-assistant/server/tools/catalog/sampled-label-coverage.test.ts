@@ -51,6 +51,22 @@ import { IndexerRequest } from '../types';
  * record a real, verified reason, not a rubber stamp.
  */
 const SAMPLED_LABEL_ONE_TO_ONE: Record<string, string> = {
+  // get-top-agents.ts (#8909's tool, registered by a branch this test was written BEFORE — this
+  // suite's own doc comment predicted it would be walked and fail the moment it landed, and it
+  // did): `wazuh.agent.id` -> `wazuh.agent.name` is 1:1 in Wazuh because an agent carries exactly
+  // one name at a time, and the id is the stable identity the Manager assigns. VERIFIED on the lab
+  // over the tool's default window: every agent-id bucket had a name cardinality of 1, including
+  // the near-miss pair `wazuh-aio-5` (id 001) and `wazuh-aio-05` (id 998), which are two DISTINCT
+  // agents rather than one agent with two names.
+  // HONEST RESIDUE, recorded rather than hidden: unlike the SCA and ATT&CK entries above this is
+  // EMPIRICAL, not guaranteed by a schema — an agent RENAMED mid-window produces two names for one
+  // id, and the sampled name would then be whichever document top_hits happened to pick. The
+  // rename case is rare and the id remains authoritative, so the sample stays the right
+  // instrument; if renames ever matter here, the fix is a sibling cardinality guard on
+  // `wazuh.agent.name` (mirroring get-top-rules.ts's `distinct_titles`), not a wider exemption.
+  'get_top_agents/wazuh.agent.name':
+    'agent id -> agent name is 1:1 (one name per agent at a time); empirical, with the ' +
+    'mid-window-rename residue recorded above.',
   // get-sca-results.ts: `policy.id` -> `policy.name` is 1:1 BY SCA DESIGN -- one Wazuh SCA policy
   // document (e.g. "cis_debian10") has exactly one name, unlike a rule id (reused across
   // differently-worded rule text). Live-verified against the wazuh-states-sca mapping (see
