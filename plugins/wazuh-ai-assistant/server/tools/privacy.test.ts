@@ -974,6 +974,33 @@ test('applyFieldPolicy: a "never" agg field drops only its own buckets', () => {
   assert.equal(out.breakdown![0].agg, 'by_rule');
 });
 
+test('applyFieldPolicy: when a "never" policy drops EVERY bucket, breakdownNote goes with the breakdown', () => {
+  // FAILS ON BASE (and against #8935 item 1's first cut): the spread carried `breakdownNote`
+  // through untouched while the empty scrub result deleted `breakdown`, leaving a note that
+  // asserts concrete truncation figures about a bucket list that is not in the payload. 'never'
+  // is user-settable (server/routes/settings.ts), so this is reachable from settings alone.
+  const policy: FieldPolicyEntry[] = [{ field: 'data.srcip', action: 'never' }];
+  const p = new Pseudonymizer();
+  const digest = baseDigest({
+    breakdown: [
+      { key: '10.0.0.5', count: 5 },
+      { key: '10.0.0.6', count: 3 },
+    ],
+    breakdownNote:
+      'Per-bucket counts are exact, but the bucket list is incomplete — further matches fall ' +
+      'under keys not listed (12).',
+  });
+  // `scalarSpec`, not a bare string: see that helper's doc comment -- a string map resolves to no
+  // spec, the 'never' entry would never be found, and this test would stop testing anything.
+  const aggFields = { by_ip: scalarSpec('data.srcip') };
+  const out = applyFieldPolicy(digest, policy, p, aggFields);
+  assert.ok(!('breakdown' in out), 'every bucket was policy-dropped');
+  assert.ok(
+    !('breakdownNote' in out),
+    'a note describing a deleted breakdown must not reach the provider',
+  );
+});
+
 test('applyFieldPolicy: get_agent_inventory packages breakdown anonymizes package.vendor buckets, not package.architecture', () => {
   // Reproduces the exact reported defect against the REAL FIELD_POLICY_DEFAULTS + the identity
   // map executor.ts builds for a breakdownDimensions tool (dimension -> itself, see executor.ts's
@@ -1099,6 +1126,65 @@ test('extractAggFields: resolves composite to a "composite" spec keyed by source
     kind: 'composite',
     fields: { ip: 'source.ip', agent: 'wazuh.agent.id' },
   });
+});
+
+// --- applyFieldPolicy: samples[].key attribution with a leading metric agg (#8920 item 5) --------
+
+/**
+ * Since digest.ts's `bucketsToRows` sources rows from the first agg WITH BUCKETS (skipping a
+ * leading metric agg), the `key` sample column must be resolved against that same aggregation's
+ * field — not the first DECLARED one. These two pin both directions of the misattribution a
+ * declaration-order lookup would reintroduce.
+ */
+test('applyFieldPolicy: "key" resolves against the BUCKET agg, not a leading cardinality agg', () => {
+  // cardinality on an 'allow' field (wazuh.agent.id) declared FIRST; terms on an 'anonymize'
+  // field (wazuh.agent.name) second. The rows/samples come from the terms agg, so the hostnames
+  // under samples[].key MUST be pseudonymized — resolving against wazuh.agent.id's 'allow' entry
+  // would send them to the provider verbatim.
+  const policy: FieldPolicyEntry[] = [
+    { field: 'wazuh.agent.id', action: 'allow' },
+    { field: 'wazuh.agent.name', action: 'anonymize', kind: 'HOST' },
+  ];
+  const p = new Pseudonymizer();
+  const out = applyFieldPolicy(
+    baseDigest({ samples: [{ key: 'web-prod-01', doc_count: 42 }] }),
+    policy,
+    p,
+    extractAggFields({
+      aggs: {
+        distinct_ids: { cardinality: { field: 'wazuh.agent.id' } },
+        by_agent: { terms: { field: 'wazuh.agent.name', size: 10 } },
+      },
+    }),
+  );
+  assert.deepEqual(out.samples, [{ key: 'HOST_1', doc_count: 42 }]);
+});
+
+test('applyFieldPolicy: a leading fieldless metric agg does not blanket-pseudonymize bucket keys', () => {
+  // Mirror direction: an avg/sum/min/max agg has no extractable field at all. If it won the
+  // attribution, `key` would resolve by its own literal name, find no policy entry, and the
+  // escape hatch's fail-closed default would mint VAL_n for every bucket key — real rule ids
+  // arriving at the model as pseudonyms while breakdown carries them verbatim. The terms agg's
+  // 'allow' field must win instead.
+  const policy: FieldPolicyEntry[] = [
+    { field: 'wazuh.rule.id', action: 'allow' },
+  ];
+  const p = new Pseudonymizer();
+  const out = applyFieldPolicy(
+    baseDigest({ samples: [{ key: '5710', doc_count: 66 }] }),
+    policy,
+    p,
+    extractAggFields({
+      aggs: {
+        avg_level: { avg: { field: 'wazuh.rule.level' } },
+        by_rule: { terms: { field: 'wazuh.rule.id', size: 10 } },
+      },
+    }),
+    'search_wazuh_data',
+    true, // isEscapeHatch — the fail-closed default is exactly what must NOT fire here
+  );
+  assert.deepEqual(out.samples, [{ key: '5710', doc_count: 66 }]);
+  assert.equal(p.newEntries().length, 0);
 });
 
 // --- applyFieldPolicy: samples[].key attribution with a leading metric agg (#8920 item 5) --------
