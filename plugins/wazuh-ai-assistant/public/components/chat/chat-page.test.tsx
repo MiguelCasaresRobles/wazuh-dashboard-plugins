@@ -939,6 +939,105 @@ describe('ChatPage — interrupted turns and failed saves', () => {
     );
   });
 
+  it('"Retry now" on the save-failed callout re-saves through the same path and clears the notice on success, without creating a second conversation', async () => {
+    const stream = createControllableStream();
+    mockStreamChat.mockImplementation(
+      (_providerId, _messages, signal: AbortSignal) => stream.generate(signal),
+    );
+    // Persistent failure: both this turn's pre-send AND post-answer saves fail, so the notice is
+    // still up (with nothing else left to auto-retry it) when the user clicks the button.
+    mockConversationsService.create.mockRejectedValue(httpError(500));
+
+    renderChatPage();
+    await sendMessage('first question');
+    await waitFor(() =>
+      expect(
+        screen.getByText('This conversation is not being saved'),
+      ).toBeInTheDocument(),
+    );
+    stream.push({ type: 'delta', content: 'an answer' });
+    stream.push({ type: 'done' });
+    stream.end();
+    await waitFor(() =>
+      expect(mockConversationsService.create).toHaveBeenCalledTimes(2),
+    );
+    expect(
+      screen.getByText('This conversation is not being saved'),
+    ).toBeInTheDocument();
+
+    // Whatever was blocking the save is now fixed — the next attempt succeeds.
+    mockConversationsService.create.mockResolvedValueOnce(
+      conversationRecord({ id: 'conv-retried', version: 'v1' }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Retry now' }));
+
+    await waitFor(() =>
+      expect(
+        screen.queryByText('This conversation is not being saved'),
+      ).not.toBeInTheDocument(),
+    );
+    // Exactly one more `create` call — the retry reuses `persistConversationTurn`, not a second
+    // save implementation — and the conversation it just created becomes this tab's active one,
+    // never a second row: the update.mock check confirms this by targeting that id.
+    expect(mockConversationsService.create).toHaveBeenCalledTimes(3);
+    const [title, messages] =
+      mockConversationsService.create.mock.calls[2];
+    expect(title).toBeTruthy();
+    expect(messages[messages.length - 1].content).toBe('an answer');
+
+    // A later turn updates the row the retry created instead of creating another one.
+    await sendMessage('second question');
+    await waitFor(() =>
+      expect(mockConversationsService.update).toHaveBeenCalled(),
+    );
+    expect(mockConversationsService.update.mock.calls[0][0]).toBe(
+      'conv-retried',
+    );
+    expect(mockConversationsService.create).toHaveBeenCalledTimes(3);
+  });
+
+  it('disables "Retry now" while a turn is generating, so it cannot double-create the conversation', async () => {
+    const stream = createControllableStream();
+    mockStreamChat.mockImplementation(
+      (_providerId, _messages, signal: AbortSignal) => stream.generate(signal),
+    );
+    // The pre-send save (before any streaming starts) fails first, raising the callout while the
+    // turn is still generating; the post-answer save that follows once the stream ends succeeds.
+    mockConversationsService.create
+      .mockRejectedValueOnce(httpError(500))
+      .mockResolvedValueOnce(conversationRecord({ id: 'conv-new', version: 'v1' }));
+
+    renderChatPage();
+    await sendMessage('first question');
+    await waitFor(() =>
+      expect(
+        screen.getByText('This conversation is not being saved'),
+      ).toBeInTheDocument(),
+    );
+    expect(mockConversationsService.create).toHaveBeenCalledTimes(1);
+
+    // The turn is still streaming: clicking "Retry now" here must be a no-op — it is disabled
+    // precisely so this window (the in-flight turn's own target not yet resolved, per
+    // `handleRetrySave`'s doc comment) can never race the turn's own saves into a second create.
+    const retryButton = screen.getByRole('button', { name: 'Retry now' });
+    expect(retryButton).toBeDisabled();
+    fireEvent.click(retryButton);
+    expect(mockConversationsService.create).toHaveBeenCalledTimes(1);
+
+    stream.push({ type: 'delta', content: 'an answer' });
+    stream.push({ type: 'done' });
+    stream.end();
+
+    // Only the turn's own post-answer save creates the row — never a second one from the blocked
+    // retry click.
+    await waitFor(() =>
+      expect(
+        screen.queryByText('This conversation is not being saved'),
+      ).not.toBeInTheDocument(),
+    );
+    expect(mockConversationsService.create).toHaveBeenCalledTimes(2);
+  });
+
   it('does not raise the save notice for a 401, which has its own callout', async () => {
     const stream = createControllableStream();
     mockStreamChat.mockImplementation(
@@ -1537,5 +1636,79 @@ describe('ChatPage — pre-turn Manager session guard (issue #8826)', () => {
       expect(mockSettingsService.getAssistantSettings).toHaveBeenCalled(),
     );
     expect(mockSettingsService.getSettingsAccess).not.toHaveBeenCalled();
+  });
+});
+
+describe('ChatPage — welcome-state layout does not clip the composer', () => {
+  /**
+   * Regression guard for the composer-clipping bug: the chat pane (the region with `overflowY:
+   * 'auto'`, identified by its `aria-label`) must never carry `justifyContent: 'center'` in the
+   * welcome state. That combination is what caused the bug — a centered flex box whose content
+   * (hero + cards + composer) is taller than the pane distributes the overflow equally above and
+   * below, and since `scrollTop` can never go negative, the top half becomes unreachable while the
+   * bottom (the composer) renders past the visible edge or mid-content. The pane must stay
+   * `flex-start` at all times; any vertical centering happens further down, inside flex-grow
+   * spacers that collapse to zero instead of going negative.
+   */
+  it('never centers the scrollable chat pane itself, even on the welcome screen', async () => {
+    renderChatPage();
+    await waitFor(() =>
+      expect(
+        screen.getByText('Ask the AI Assistant something'),
+      ).toBeInTheDocument(),
+    );
+
+    const pane = screen.getByRole('region', { name: 'Chat' });
+    expect(pane.style.justifyContent).not.toBe('center');
+    expect(pane.style.overflowY).toBe('auto');
+  });
+
+  it('keeps the composer input reachable once a callout pushes the welcome content down', async () => {
+    mockConversationsService.create.mockRejectedValue(httpError(500));
+    const stream = createControllableStream();
+    mockStreamChat.mockImplementation(
+      (_providerId, _messages, signal: AbortSignal) => stream.generate(signal),
+    );
+
+    renderChatPage();
+    // A save-failed callout above the welcome content is exactly the kind of extra height that
+    // used to push the composer out of the centered flex box and off screen.
+    await sendMessage('first question');
+    await waitFor(() =>
+      expect(
+        screen.getByText('This conversation is not being saved'),
+      ).toBeInTheDocument(),
+    );
+
+    // The composer is still there and not display:none/visibility:hidden'd — the whole point of
+    // the fix is that it stays in the DOM's visible flow, with the pane scrolling to reach it
+    // rather than the layout clipping it.
+    expect(screen.getByLabelText('Chat message')).toBeVisible();
+    const pane = screen.getByRole('region', { name: 'Chat' });
+    expect(pane.style.justifyContent).not.toBe('center');
+  });
+
+  /**
+   * Regression guard for the shrink/overlap bug: the welcome column (the pane's direct child) must
+   * never be shrinkable (`flex-shrink: 0`, i.e. a flex-basis of `1 0 auto`). A shrinkable column
+   * (`1 1 auto`, tried and reverted) let the pane squeeze it below its own content's height once
+   * welcome content plus a callout above it overflowed the pane — pushing the cards to render
+   * BEHIND the opaque sticky composer instead of the pane scrolling cleanly. A conversation's own
+   * column already uses `1 0 auto` for the same reason (see its own comment); the welcome state
+   * must match, not diverge.
+   */
+  it('never lets the welcome column shrink below its own content height', async () => {
+    renderChatPage();
+    await waitFor(() =>
+      expect(
+        screen.getByText('Ask the AI Assistant something'),
+      ).toBeInTheDocument(),
+    );
+
+    const pane = screen.getByRole('region', { name: 'Chat' });
+    const column = pane.firstElementChild as HTMLElement;
+    expect(column.style.flex).toBe('1 0 auto');
+    // jsdom serializes the numeric `minHeight: 0` style as '0'; real browsers report '0px'.
+    expect(['0', '0px']).toContain(column.style.minHeight);
   });
 });
