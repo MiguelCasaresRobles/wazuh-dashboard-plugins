@@ -20,7 +20,6 @@ import {
   EuiConfirmModal,
   EuiButtonIcon,
   EuiToolTip,
-  EuiBadge,
   EuiLoadingSpinner,
   EuiSwitch,
   EuiPanel,
@@ -202,6 +201,15 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
     Record<string, { success: boolean; latencyMs: number; message?: string }>
   >({});
   const [testingIds, setTestingIds] = useState<Set<string>>(new Set());
+  // Ids of providers whose *last* test was explicitly triggered by the user (table row "Test"
+  // action), as opposed to the silent auto-probe run once on mount for every loaded provider.
+  // Only a manual failure (or the default provider failing, handled separately below) earns a
+  // page-level callout — the auto-probe's result still lands in the table's per-row status cell,
+  // it just never escalates to a banner on its own. See `manualTestFailures` below.
+  const [manualTestIds, setManualTestIds] = useState<Set<string>>(new Set());
+  // Dismissal is keyed per callout: a manual-test failure dismisses under the bare provider id;
+  // the default-provider-failing callout dismisses under a separate `default:${id}` key so
+  // dismissing one never silently dismisses the other for the same provider.
   const [dismissedErrorIds, setDismissedErrorIds] = useState<Set<string>>(
     new Set(),
   );
@@ -241,11 +249,27 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
   );
   const [isSavingRetention, setIsSavingRetention] = useState(false);
   const [fieldPolicyFilter, setFieldPolicyFilter] = useState('');
-  const failedProviders = providers.filter(
+  // Page-level callout #2: the default provider is failing (whether the failure came from the
+  // silent auto-probe or a manual test) — the one case that breaks chat, so it always surfaces,
+  // compact and dismissible, regardless of who triggered the test.
+  const failingDefaultProvider = providers.find(
     p =>
+      p.isDefault &&
       testResults[p.id] &&
       !testResults[p.id].success &&
-      !dismissedErrorIds.has(p.id),
+      !dismissedErrorIds.has(`default:${p.id}`),
+  );
+  // Page-level callout #1: a provider the user explicitly clicked "Test" on, which failed.
+  // A provider that is ALSO the failing default is excluded here — it already gets the
+  // dedicated default-provider callout below, and showing both for the same provider/message
+  // would be duplicative.
+  const manualTestFailures = providers.filter(
+    p =>
+      manualTestIds.has(p.id) &&
+      testResults[p.id] &&
+      !testResults[p.id].success &&
+      !dismissedErrorIds.has(p.id) &&
+      p.id !== failingDefaultProvider?.id,
   );
   const hasEmptyFieldPolicyRow = fieldPolicyDraft.some(
     entry => entry.field.trim() === '',
@@ -451,7 +475,10 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
       .list()
       .then(loaded => {
         setProviders(loaded);
-        loaded.forEach(p => handleTest(p));
+        // Silent auto-probe: populates the per-row status cell so the table itself shows
+        // green/red at a glance, but never marked as "manual" — see `manualTestFailures` above,
+        // it must not spawn a page-level callout on its own on every visit.
+        loaded.forEach(p => handleTest(p, { manual: false }));
       })
       .catch(() =>
         setError(
@@ -573,11 +600,23 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
     }
   };
 
-  const handleTest = async (provider: ProviderSummary) => {
+  // `manual` has no default here on purpose (see the finding this fixed): a future call site
+  // that forgets to pass it should fail to compile rather than silently gain page-level banner
+  // rights. The row action below gets its own thin wrapper (`handleManualTest`) that always
+  // passes `manual: true`; the auto-probe on mount passes `manual: false` explicitly.
+  const handleTest = async (
+    provider: ProviderSummary,
+    options: { manual: boolean },
+  ) => {
     setTestingIds(current => new Set(current).add(provider.id));
+    if (options.manual) {
+      setManualTestIds(current => new Set(current).add(provider.id));
+    }
+    // A fresh test result deserves a fresh chance to show its callout, whichever kind applies.
     setDismissedErrorIds(current => {
       const next = new Set(current);
       next.delete(provider.id);
+      next.delete(`default:${provider.id}`);
       return next;
     });
     try {
@@ -600,6 +639,11 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
       });
     }
   };
+
+  // Row action wrapper: the only call site that should ever pass `manual: true` — see the
+  // no-default rationale on `handleTest` above.
+  const handleManualTest = (provider: ProviderSummary) =>
+    handleTest(provider, { manual: true });
 
   const columns: EuiBasicTableColumn<ProviderSummary>[] = [
     {
@@ -722,20 +766,30 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
         }
         if (result.success) {
           return (
-            <EuiBadge color='success'>
+            <EuiHealth color='success'>
               {i18n.translate('wazuhAiAssistant.settings.testSuccessBadge', {
                 defaultMessage: 'OK ({latency} ms)',
                 values: { latency: result.latencyMs },
               })}
-            </EuiBadge>
+            </EuiHealth>
           );
         }
+        const failureMessage =
+          result.message ??
+          i18n.translate('wazuhAiAssistant.settings.testFailureUnknown', {
+            defaultMessage: 'Connection failed.',
+          });
         return (
-          <EuiBadge color='danger'>
-            {i18n.translate('wazuhAiAssistant.settings.testFailureBadge', {
-              defaultMessage: 'Failed',
-            })}
-          </EuiBadge>
+          <EuiToolTip content={failureMessage}>
+            <EuiHealth color='danger'>
+              <span
+                className='eui-textTruncate'
+                style={{ display: 'inline-block', maxWidth: '100px' }}
+              >
+                {failureMessage}
+              </span>
+            </EuiHealth>
+          </EuiToolTip>
         );
       },
     },
@@ -757,7 +811,8 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
           ),
           icon: 'play',
           type: 'icon' as const,
-          onClick: handleTest,
+          isPrimary: true,
+          onClick: handleManualTest,
           enabled: (provider: ProviderSummary) => !testingIds.has(provider.id),
         },
         {
@@ -895,7 +950,10 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
               )}
 
               <EuiBasicTable items={providers} columns={columns} itemId='id' />
-              {failedProviders.map(p => (
+              {/* Only a test the user explicitly clicked earns a page-level callout — the
+                  silent auto-probe's result lives solely in the per-row status cell above, so it
+                  never reappears as a banner on every visit. */}
+              {manualTestFailures.map(p => (
                 <React.Fragment key={p.id}>
                   <EuiSpacer size='s' />
                   <EuiCallOut
@@ -923,6 +981,44 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                   />
                 </React.Fragment>
               ))}
+              {/* The one auto-probe failure that still gets a banner: the default provider is
+                  what the chat actually calls, so a broken default is surfaced even when nobody
+                  clicked "Test" — kept single and dismissible, unlike the old permanent banners. */}
+              {failingDefaultProvider && (
+                <>
+                  <EuiSpacer size='s' />
+                  <EuiCallOut
+                    color='danger'
+                    iconType='alert'
+                    size='s'
+                    title={i18n.translate(
+                      'wazuhAiAssistant.settings.defaultProviderFailureCallout',
+                      {
+                        defaultMessage:
+                          'Default provider "{name}" is failing: {message}',
+                        values: {
+                          name: failingDefaultProvider.name,
+                          message:
+                            testResults[failingDefaultProvider.id].message ??
+                            i18n.translate(
+                              'wazuhAiAssistant.settings.testFailureUnknown',
+                              { defaultMessage: 'Connection failed.' },
+                            ),
+                        },
+                      },
+                    )}
+                    onDismiss={() =>
+                      setDismissedErrorIds(
+                        prev =>
+                          new Set([
+                            ...prev,
+                            `default:${failingDefaultProvider.id}`,
+                          ]),
+                      )
+                    }
+                  />
+                </>
+              )}
             </EuiPanel>
 
             <EuiSpacer size='xl' />
