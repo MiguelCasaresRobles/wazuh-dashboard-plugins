@@ -143,6 +143,7 @@
 | [#9008](https://github.com/wazuh/wazuh-dashboard-plugins/issues/9008) | Fixed AI Assistant evidence popover: index/time range, one clamp badge, Escape close, Discover label                                                                                          |
 | [#9009](https://github.com/wazuh/wazuh-dashboard-plugins/issues/9009) | Fixed the AI Assistant results table to default to a 10-row page (hiding pagination when everything already fits), state the total row count and page position in its accessible caption, pluralize the row count correctly, announce row-expander state via `aria-expanded`, and show only the first columns with truncated, tooltipped text in narrow (sidecar) containers |
 | [#9030](https://github.com/wazuh/wazuh-dashboard-plugins/issues/9030) | Fixed AI Assistant provider settings: required fields are validated before saving, a blocked endpoint is reported as such, and an invalid retention value is no longer clamped to 0           |
+| [#9029](https://github.com/wazuh/wazuh-dashboard-plugins/issues/9029) | Fixed the AI Assistant chat composer not describing itself: the privacy control is a labelled switch with persistent help, answers name their provider, and failed turns keep a retry marker  |
 
 ### Removed
 
