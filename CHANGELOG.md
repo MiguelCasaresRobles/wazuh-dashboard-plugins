@@ -146,6 +146,7 @@
 | [#9029](https://github.com/wazuh/wazuh-dashboard-plugins/issues/9029) | Fixed the AI Assistant chat composer not describing itself: the privacy control is a labelled switch with persistent help, answers name their provider, and failed turns keep a retry marker  |
 | [#9026](https://github.com/wazuh/wazuh-dashboard-plugins/issues/9026) | Fixed the AI Assistant "Open in Discover" link opening a last-24-hours window for a query that had no time filter, so Discover could show a smaller total than the answer; the results table now drops a column that is empty for every row (promoting a populated field into its place) and discloses every extra field the row expander reveals, not only demoted columns |
 | [#8974](https://github.com/wazuh/wazuh-dashboard-plugins/issues/8974) | Fixed AI Assistant privacy mode sending usernames and hostnames quoted inside readable free-text fields (rule titles, rule/decoder descriptions and names) to the AI provider unmasked, by scanning those fields against the identifiers the conversation has already pseudonymized |
+| [#8975](https://github.com/wazuh/wazuh-dashboard-plugins/issues/8975) | Fixed the AI Assistant Spanish translation catalog: stale entries were corrected and 73 untranslated strings added, so the UI no longer falls back to English on `i18n.locale: es-ES`         |
 
 ### Removed
 
