@@ -373,14 +373,36 @@ function sourceMessages(): Map<string, SourceMessage> {
   return sourceScan().messages;
 }
 
-/** Top-level ICU argument names of a message: `{name}`, `{count, plural, ...}`. */
+/**
+ * Top-level ICU argument names of a message: `{name}`, `{count, plural, ...}`.
+ *
+ * Only braces opened at nesting depth 0 name an argument. The bodies of a `plural`/`select`
+ * branch are LITERAL TEXT, so a single-word branch such as the `one {conversation}` in
+ * "the selected {count, plural, one {conversation} other {conversations}}" must not be read as
+ * two extra arguments named `conversation`/`conversations` — a depth-blind scan did exactly that,
+ * and since a translation renders those words in its OWN language it could never match, which
+ * demanded English words inside the Spanish string to pass. Nested arguments are still compared
+ * through their top-level parent, whose name is what a caller actually has to supply.
+ */
 function icuPlaceholders(message: string): string[] {
   const found = new Set<string>();
-  const pattern = /\{\s*([A-Za-z0-9_$]+)\s*[,}]/g;
-  let match = pattern.exec(message);
-  while (match !== null) {
-    found.add(match[1]);
-    match = pattern.exec(message);
+  let depth = 0;
+  for (let index = 0; index < message.length; index += 1) {
+    const char = message[index];
+    if (char === '}') {
+      depth = Math.max(0, depth - 1);
+      continue;
+    }
+    if (char !== '{') {
+      continue;
+    }
+    if (depth === 0) {
+      const name = /^\{\s*([A-Za-z0-9_$]+)\s*[,}]/.exec(message.slice(index));
+      if (name) {
+        found.add(name[1]);
+      }
+    }
+    depth += 1;
   }
   const names: string[] = [];
   found.forEach(name => names.push(name));
